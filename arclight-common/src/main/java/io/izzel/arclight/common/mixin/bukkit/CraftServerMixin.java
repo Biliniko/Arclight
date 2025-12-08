@@ -206,4 +206,12 @@ public abstract class CraftServerMixin implements CraftServerBridge {
         this.enablePlugins(PluginLoadOrder.POSTWORLD);
         this.getPluginManager().callEvent(new ServerLoadEvent(ServerLoadEvent.LoadType.RELOAD));
     }
+
+    /**
+     * Implements Paper API's getMinecraftVersion()
+     * Required by plugins like ModelEngine 4
+     */
+    public String getMinecraftVersion() {
+        return this.console.getServerVersion();
+    }
 }

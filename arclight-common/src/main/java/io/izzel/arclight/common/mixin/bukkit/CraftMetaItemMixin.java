@@ -3,6 +3,8 @@ package io.izzel.arclight.common.mixin.bukkit;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.izzel.arclight.common.bridge.bukkit.ItemMetaBridge;
+import net.md_5.bungee.api.chat.BaseComponent;
+import net.md_5.bungee.chat.ComponentSerializer;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.Tag;
@@ -23,6 +25,8 @@ import org.spongepowered.asm.mixin.injection.callback.LocalCapture;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -32,7 +36,44 @@ public class CraftMetaItemMixin implements ItemMetaBridge {
     // @formatter:off
     @Shadow(remap = false) @Final private Map<String, Tag> unhandledTags;
     @Shadow(remap = false) private CompoundTag internalTag;
+    @Shadow(remap = false) private String displayName;
+    @Shadow(remap = false) private List<String> lore;
     // @formatter:on
+
+    // Paper API - Start
+    public BaseComponent[] getDisplayNameComponent() {
+        if (displayName == null) {
+            return null;
+        }
+        return ComponentSerializer.parse(displayName);
+    }
+
+    public void setDisplayNameComponent(BaseComponent[] component) {
+        this.displayName = (component == null) ? null : ComponentSerializer.toString(component);
+    }
+
+    public List<BaseComponent[]> getLoreComponents() {
+        if (lore == null) {
+            return null;
+        }
+        List<BaseComponent[]> result = new ArrayList<>(lore.size());
+        for (String line : lore) {
+            result.add(ComponentSerializer.parse(line));
+        }
+        return result;
+    }
+
+    public void setLoreComponents(List<BaseComponent[]> lore) {
+        if (lore == null) {
+            this.lore = null;
+        } else {
+            this.lore = new ArrayList<>(lore.size());
+            for (BaseComponent[] components : lore) {
+                this.lore.add(ComponentSerializer.toString(components));
+            }
+        }
+    }
+    // Paper API - End
 
     private static final Set<String> EXTEND_TAGS = ImmutableSet.of(
         "map_is_scaling",

@@ -19,6 +19,7 @@ import io.izzel.arclight.common.mod.server.world.WorldSymlink;
 import io.izzel.arclight.common.mod.util.ArclightCaptures;
 import io.izzel.arclight.common.mod.util.DelegateWorldInfo;
 import io.izzel.arclight.common.mod.util.DistValidate;
+import io.izzel.arclight.common.util.PerfMath;
 import io.izzel.arclight.i18n.ArclightConfig;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -82,6 +83,7 @@ import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
@@ -92,9 +94,11 @@ import org.spongepowered.asm.mixin.injection.callback.LocalCapture;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executor;
+import java.util.function.BooleanSupplier;
 
 @Mixin(ServerLevel.class)
 public abstract class ServerLevelMixin extends LevelMixin implements ServerWorldBridge {
@@ -120,6 +124,17 @@ public abstract class ServerLevelMixin extends LevelMixin implements ServerWorld
     public LevelStorageSource.LevelStorageAccess convertable;
     public UUID uuid;
     public ResourceKey<LevelStem> typeKey;
+
+    @Unique private static final int ARCLIGHT_SAMPLE_INTERVAL = 100; // 5s at 20 TPS
+    @Unique private static final long ARCLIGHT_MAX_LAG_MS = 1000;
+
+    @Unique private long arclight$tickStartNs;
+    @Unique private double arclight$msptAccum;
+    @Unique private int arclight$msptSamples;
+    @Unique private double arclight$lastSampleMspt = 50.0;
+    @Unique private final double[] arclight$recentMspt = new double[3];
+    @Unique private long arclight$lagMsPerTick;
+    @Unique private int arclight$lagTicksRemaining;
 
     @Override
     public ResourceKey<LevelStem> getTypeKey() {
@@ -177,6 +192,10 @@ public abstract class ServerLevelMixin extends LevelMixin implements ServerWorld
         ((WorldInfoBridge) this.K).bridge$setWorld((ServerLevel) (Object) this);
         var data = this.getDataStorage().computeIfAbsent(LevelPersistentData::new, () -> new LevelPersistentData(null), "bukkit_pdc");
         this.bridge$getWorld().readBukkitValues(data.getTag());
+
+        arclight$msptAccum = 0;
+        arclight$msptSamples = 0;
+        Arrays.fill(arclight$recentMspt, 50.0);
     }
 
     @Inject(method = "saveLevelData", at = @At("RETURN"))
@@ -446,6 +465,87 @@ public abstract class ServerLevelMixin extends LevelMixin implements ServerWorld
     @Override
     public ServerLevel bridge$getMinecraftWorld() {
         return (ServerLevel) (Object) this;
+    }
+
+    @Override
+    public double[] bridge$getRecentMspt() {
+        return Arrays.copyOf(arclight$recentMspt, arclight$recentMspt.length); // defensive copy
+    }
+
+    @Override
+    public double bridge$getLastSampleMspt() {
+        return arclight$lastSampleMspt;
+    }
+
+    @Inject(method = "tick", at = @At("HEAD"))
+    private void arclight$startWorldTick(BooleanSupplier hasTimeLeft, CallbackInfo ci) {
+        arclight$tickStartNs = System.nanoTime();
+    }
+
+    @Inject(method = "tick", at = @At("RETURN"))
+    private void arclight$endWorldTick(BooleanSupplier hasTimeLeft, CallbackInfo ci) {
+        arclight$applyLag();
+        double mspt = (System.nanoTime() - arclight$tickStartNs) / 1_000_000.0;
+        arclight$msptAccum += mspt;
+        arclight$msptSamples++;
+        if (arclight$msptSamples >= ARCLIGHT_SAMPLE_INTERVAL) {
+            double avgMspt = arclight$msptAccum / arclight$msptSamples;
+            arclight$lastSampleMspt = avgMspt;
+
+            arclight$recentMspt[0] = PerfMath.ema(arclight$recentMspt[0], 0.92, avgMspt);
+            arclight$recentMspt[1] = PerfMath.ema(arclight$recentMspt[1], 0.9835, avgMspt);
+            arclight$recentMspt[2] = PerfMath.ema(arclight$recentMspt[2], 0.9945, avgMspt);
+
+            arclight$msptAccum = 0;
+            arclight$msptSamples = 0;
+        }
+    }
+
+    @Override
+    public void bridge$setLagMsPerTick(long msPerTick, int ticks) {
+        long clamped = Math.max(0, Math.min(ARCLIGHT_MAX_LAG_MS, msPerTick)); // avoid accidental long stalls
+        this.arclight$lagMsPerTick = clamped;
+        this.arclight$lagTicksRemaining = ticks <= 0 ? -1 : ticks;
+    }
+
+    @Override
+    public void bridge$clearLag() {
+        this.arclight$lagMsPerTick = 0;
+        this.arclight$lagTicksRemaining = 0;
+    }
+
+    @Override
+    public long bridge$getLagMsPerTick() {
+        return arclight$lagMsPerTick;
+    }
+
+    @Override
+    public int bridge$getLagTicksRemaining() {
+        return arclight$lagTicksRemaining;
+    }
+
+    @Unique
+    // Test-only lag injection on the main thread.
+    private void arclight$applyLag() {
+        if (arclight$lagMsPerTick <= 0) {
+            return;
+        }
+        arclight$busyWaitMs(arclight$lagMsPerTick);
+        if (arclight$lagTicksRemaining > 0) {
+            arclight$lagTicksRemaining--;
+            if (arclight$lagTicksRemaining == 0) {
+                arclight$lagMsPerTick = 0;
+            }
+        }
+    }
+
+    @Unique
+    // Busy wait to emulate worst-case CPU-bound stalls.
+    private static void arclight$busyWaitMs(long ms) {
+        long end = System.nanoTime() + (ms * 1_000_000L);
+        while (System.nanoTime() < end) {
+            // intentional busy wait
+        }
     }
 
     /**

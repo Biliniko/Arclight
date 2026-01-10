@@ -27,4 +27,34 @@ public interface ServerWorldBridge extends WorldBridge {
     boolean bridge$addAllEntitiesSafely(Entity entity, org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason reason);
 
     LevelStorageSource.LevelStorageAccess bridge$getConvertable();
+
+    /**
+     * Returns the recent world MSPT values (1m/5m/15m EMA) sampled at 5s intervals.
+     */
+    double[] bridge$getRecentMspt();
+
+    /**
+     * Returns the most recent 5s average MSPT sample.
+     */
+    double bridge$getLastSampleMspt();
+
+    /**
+     * Test-only lag injection. Adds a per-tick delay to this world on the main thread.
+     */
+    void bridge$setLagMsPerTick(long msPerTick, int ticks);
+
+    /**
+     * Clears any injected lag for this world.
+     */
+    void bridge$clearLag();
+
+    /**
+     * Returns the configured lag milliseconds per tick.
+     */
+    long bridge$getLagMsPerTick();
+
+    /**
+     * Returns remaining lag ticks, or -1 for indefinite.
+     */
+    int bridge$getLagTicksRemaining();
 }

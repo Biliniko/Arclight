@@ -9,6 +9,7 @@ import io.izzel.arclight.common.mod.ArclightConstants;
 import io.izzel.arclight.common.mod.server.BukkitRegistry;
 import io.izzel.arclight.common.mod.util.ArclightCaptures;
 import io.izzel.arclight.common.mod.util.BukkitOptionParser;
+import io.izzel.arclight.common.util.PerfMath;
 import it.unimi.dsi.fastutil.longs.LongIterator;
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
@@ -172,6 +173,11 @@ public abstract class MinecraftServerMixin extends ReentrantBlockableEventLoop<T
     private static final int SAMPLE_INTERVAL = 100;
     private static int currentTick = (int) (System.currentTimeMillis() / 50);
     public final double[] recentTps = new double[3];
+    @Unique private static final int ARCLIGHT_SAMPLE_INTERVAL = 100; // 5s at 20 TPS
+    @Unique private long arclight$tickStartNs;
+    @Unique private double arclight$msptAccum;
+    @Unique private int arclight$msptSamples;
+    @Unique private double arclight$lastSampleMspt = 50.0;
 
     public boolean hasStopped() {
         synchronized (stopLock) {
@@ -195,6 +201,9 @@ public abstract class MinecraftServerMixin extends ReentrantBlockableEventLoop<T
         }
         this.vanillaCommandDispatcher = worldStem.dataPackResources().getCommands();
         this.worldLoader = ArclightCaptures.getDataLoadContext();
+        arclight$msptAccum = 0;
+        arclight$msptSamples = 0;
+        arclight$lastSampleMspt = 50.0;
     }
 
     /**
@@ -289,7 +298,25 @@ public abstract class MinecraftServerMixin extends ReentrantBlockableEventLoop<T
     }
 
     private static double calcTps(double avg, double exp, double tps) {
-        return (avg * exp) + (tps * (1 - exp));
+        return PerfMath.ema(avg, exp, tps);
+    }
+
+    @Inject(method = "tickServer", at = @At("HEAD"))
+    private void arclight$startServerTick(BooleanSupplier hasTimeLeft, CallbackInfo ci) {
+        arclight$tickStartNs = System.nanoTime();
+    }
+
+    @Inject(method = "tickServer", at = @At("RETURN"))
+    private void arclight$endServerTick(BooleanSupplier hasTimeLeft, CallbackInfo ci) {
+        double mspt = (System.nanoTime() - arclight$tickStartNs) / 1_000_000.0;
+        arclight$msptAccum += mspt;
+        arclight$msptSamples++;
+        if (arclight$msptSamples >= ARCLIGHT_SAMPLE_INTERVAL) {
+            double avgMspt = arclight$msptAccum / arclight$msptSamples;
+            arclight$lastSampleMspt = avgMspt;
+            arclight$msptAccum = 0;
+            arclight$msptSamples = 0;
+        }
     }
 
     @Inject(method = "stopServer", cancellable = true, at = @At("HEAD"))
@@ -562,6 +589,14 @@ public abstract class MinecraftServerMixin extends ReentrantBlockableEventLoop<T
         return this.vanillaCommandDispatcher;
     }
 
+    @Override
+    public double bridge$getAverageTickTimeMs() {
+        if (arclight$msptSamples > 0) {
+            return arclight$msptAccum / arclight$msptSamples;
+        }
+        return arclight$lastSampleMspt;
+    }
+
     public boolean isDebugging() {
         return false;
     }
@@ -570,4 +605,3 @@ public abstract class MinecraftServerMixin extends ReentrantBlockableEventLoop<T
         return Bukkit.getServer() instanceof CraftServer ? ((CraftServer) Bukkit.getServer()).getServer() : null;
     }
 }
-

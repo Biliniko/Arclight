@@ -24,4 +24,9 @@ public interface MinecraftServerBridge {
     boolean bridge$hasStopped();
 
     Commands bridge$getVanillaCommands();
+
+    /**
+     * Returns the average server MSPT of the most recent sampling window.
+     */
+    double bridge$getAverageTickTimeMs();
 }

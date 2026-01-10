@@ -10,6 +10,7 @@ import io.izzel.arclight.common.mod.server.BukkitRegistry;
 import io.izzel.arclight.common.mod.util.ArclightCaptures;
 import io.izzel.arclight.common.mod.util.BukkitOptionParser;
 import io.izzel.arclight.common.util.PerfMath;
+import io.izzel.arclight.i18n.ArclightConfig;
 import it.unimi.dsi.fastutil.longs.LongIterator;
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
@@ -88,6 +89,7 @@ import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.net.Proxy;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Executor;
@@ -301,6 +303,36 @@ public abstract class MinecraftServerMixin extends ReentrantBlockableEventLoop<T
         return PerfMath.ema(avg, exp, tps);
     }
 
+    @Unique
+    private static boolean arclight$shouldSkipSpawnPreload(ServerLevel world) {
+        List<String> patterns = ArclightConfig.spec().getCompat().getSkipSpawnPreloadWorlds();
+        if (patterns == null || patterns.isEmpty()) {
+            return false;
+        }
+        String name = world.getLevelData() instanceof ServerLevelData data ? data.getLevelName() : null;
+        if (name == null || name.isEmpty()) {
+            return false;
+        }
+        for (String pattern : patterns) {
+            if (arclight$matchesSkipSpawnPreloadPattern(name, pattern)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Unique
+    private static boolean arclight$matchesSkipSpawnPreloadPattern(String name, String pattern) {
+        if (pattern == null || pattern.isEmpty()) {
+            return false;
+        }
+        if (pattern.endsWith("*")) {
+            String prefix = pattern.substring(0, pattern.length() - 1);
+            return !prefix.isEmpty() && name.regionMatches(true, 0, prefix, 0, prefix.length());
+        }
+        return name.equalsIgnoreCase(pattern);
+    }
+
     @Inject(method = "tickServer", at = @At("HEAD"))
     private void arclight$startServerTick(BooleanSupplier hasTimeLeft, CallbackInfo ci) {
         arclight$tickStartNs = System.nanoTime();
@@ -408,8 +440,10 @@ public abstract class MinecraftServerMixin extends ReentrantBlockableEventLoop<T
         this.nextTickTime = Util.getMillis();
         serverchunkprovider.addRegionTicket(TicketType.START, new ChunkPos(blockpos), 11, Unit.INSTANCE);
 
-        while (serverchunkprovider.getTickingGenerated() < 441) {
-            this.executeModerately();
+        if (!arclight$shouldSkipSpawnPreload(serverworld)) {
+            while (serverchunkprovider.getTickingGenerated() < 441) {
+                this.executeModerately();
+            }
         }
 
         this.executeModerately();
@@ -471,7 +505,9 @@ public abstract class MinecraftServerMixin extends ReentrantBlockableEventLoop<T
     public void prepareLevels(ChunkProgressListener listener, ServerLevel serverWorld) {
         this.markWorldsDirty();
         MinecraftForge.EVENT_BUS.post(new LevelEvent.Load(serverWorld));
-        if (!((WorldBridge) serverWorld).bridge$getWorld().getKeepSpawnInMemory()) {
+        boolean keepSpawn = ((WorldBridge) serverWorld).bridge$getWorld().getKeepSpawnInMemory();
+        boolean skipPreload = arclight$shouldSkipSpawnPreload(serverWorld);
+        if (!keepSpawn && !skipPreload) {
             return;
         }
         this.forceTicks = true;
@@ -480,10 +516,13 @@ public abstract class MinecraftServerMixin extends ReentrantBlockableEventLoop<T
         listener.updateSpawnPos(new ChunkPos(blockpos));
         ServerChunkCache serverchunkprovider = serverWorld.getChunkSource();
         this.nextTickTime = Util.getMillis();
-        serverchunkprovider.addRegionTicket(TicketType.START, new ChunkPos(blockpos), 11, Unit.INSTANCE);
-
-        while (serverchunkprovider.getTickingGenerated() < 441) {
-            this.executeModerately();
+        if (keepSpawn) {
+            serverchunkprovider.addRegionTicket(TicketType.START, new ChunkPos(blockpos), 11, Unit.INSTANCE);
+            if (!skipPreload) {
+                while (serverchunkprovider.getTickingGenerated() < 441) {
+                    this.executeModerately();
+                }
+            }
         }
 
         this.executeModerately();

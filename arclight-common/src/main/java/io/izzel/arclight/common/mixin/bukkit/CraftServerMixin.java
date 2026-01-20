@@ -5,14 +5,19 @@ import com.mojang.brigadier.StringReader;
 import com.google.common.collect.Lists;
 import io.izzel.arclight.common.bridge.bukkit.CraftServerBridge;
 import io.izzel.arclight.common.bridge.core.world.WorldBridge;
+import io.izzel.arclight.common.bridge.core.world.storage.DerivedWorldInfoBridge;
 import io.izzel.arclight.common.mod.server.ArclightServer;
 import io.izzel.arclight.common.bridge.core.entity.player.ServerPlayerEntityBridge;
 import jline.console.ConsoleReader;
 import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.world.level.storage.PrimaryLevelData;
 import net.minecraft.server.dedicated.DedicatedPlayerList;
 import net.minecraft.server.dedicated.DedicatedServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.players.PlayerList;
+import net.minecraft.world.level.biome.BiomeManager;
+import net.minecraft.world.level.storage.ServerLevelData;
+import net.minecraft.world.level.storage.WorldData;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.CommandEvent;
 import org.bukkit.Bukkit;
@@ -41,6 +46,8 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.gen.Accessor;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.Unique;
+import org.spongepowered.asm.mixin.injection.ModifyArg;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
@@ -82,6 +89,9 @@ public abstract class CraftServerMixin implements CraftServerBridge {
     @Shadow@Final private String serverVersion;
     @Accessor("logger") @Mutable public abstract void setLogger(Logger logger);
     // @formatter:on
+
+    @Unique
+    private static final ThreadLocal<ServerLevelData> arclight$createWorldInfo = new ThreadLocal<>();
 
     @Inject(method = "<init>", at = @At("RETURN"))
     public void arclight$setBrand(DedicatedServer console, PlayerList playerList, CallbackInfo ci) {
@@ -148,6 +158,38 @@ public abstract class CraftServerMixin implements CraftServerBridge {
         if (commandLine == null) {
             cir.setReturnValue(false);
         }
+    }
+
+    @Inject(method = "createWorld(Lorg/bukkit/WorldCreator;)Lorg/bukkit/World;", remap = false, at = @At("HEAD"))
+    private void arclight$clearCreateWorldInfoHead(CallbackInfoReturnable<World> cir) {
+        arclight$createWorldInfo.remove();
+    }
+
+    @ModifyArg(method = "createWorld(Lorg/bukkit/WorldCreator;)Lorg/bukkit/World;", remap = false, at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ServerLevel;<init>(Lnet/minecraft/server/MinecraftServer;Ljava/util/concurrent/Executor;Lnet/minecraft/world/level/storage/LevelStorageSource$LevelStorageAccess;Lnet/minecraft/world/level/storage/PrimaryLevelData;Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/world/level/dimension/LevelStem;Lnet/minecraft/server/level/progress/ChunkProgressListener;ZJLjava/util/List;ZLnet/minecraft/world/RandomSequences;Lorg/bukkit/World$Environment;Lorg/bukkit/generator/ChunkGenerator;Lorg/bukkit/generator/BiomeProvider;)V"), index = 3)
+    private PrimaryLevelData arclight$captureCreateWorldInfo(PrimaryLevelData worldInfo) {
+        arclight$createWorldInfo.set(worldInfo);
+        return worldInfo;
+    }
+
+    @ModifyArg(method = "createWorld(Lorg/bukkit/WorldCreator;)Lorg/bukkit/World;", remap = false, at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ServerLevel;<init>(Lnet/minecraft/server/MinecraftServer;Ljava/util/concurrent/Executor;Lnet/minecraft/world/level/storage/LevelStorageSource$LevelStorageAccess;Lnet/minecraft/world/level/storage/PrimaryLevelData;Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/world/level/dimension/LevelStem;Lnet/minecraft/server/level/progress/ChunkProgressListener;ZJLjava/util/List;ZLnet/minecraft/world/RandomSequences;Lorg/bukkit/World$Environment;Lorg/bukkit/generator/ChunkGenerator;Lorg/bukkit/generator/BiomeProvider;)V"), index = 8)
+    private long arclight$fixCreateWorldSeed(long seed) {
+        ServerLevelData current = arclight$createWorldInfo.get();
+        if (current == null) {
+            return seed;
+        }
+        while (current instanceof DerivedWorldInfoBridge bridged) {
+            current = bridged.bridge$getDelegate();
+        }
+        if (current instanceof WorldData data) {
+            // Ensure Bukkit-created worlds use their own seed instead of inheriting overworld.
+            return BiomeManager.obfuscateSeed(data.worldGenOptions().seed());
+        }
+        return seed;
+    }
+
+    @Inject(method = "createWorld(Lorg/bukkit/WorldCreator;)Lorg/bukkit/World;", remap = false, at = @At("RETURN"))
+    private void arclight$clearCreateWorldInfoReturn(CallbackInfoReturnable<World> cir) {
+        arclight$createWorldInfo.remove();
     }
 
     @Override

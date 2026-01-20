@@ -58,6 +58,7 @@ import net.minecraft.world.level.storage.DimensionDataStorage;
 import net.minecraft.world.level.storage.LevelStorageSource;
 import net.minecraft.world.level.storage.PrimaryLevelData;
 import net.minecraft.world.level.storage.ServerLevelData;
+import net.minecraft.world.level.storage.WorldData;
 import net.minecraft.world.phys.Vec3;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -196,6 +197,13 @@ public abstract class ServerLevelMixin extends LevelMixin implements ServerWorld
         arclight$msptAccum = 0;
         arclight$msptSamples = 0;
         Arrays.fill(arclight$recentMspt, 50.0);
+    }
+
+    @Inject(method = "getSeed", at = @At("HEAD"), cancellable = true)
+    private void arclight$usePerWorldSeed(CallbackInfoReturnable<Long> cir) {
+        if (this.serverLevelData instanceof WorldData data) {
+            cir.setReturnValue(data.worldGenOptions().seed());
+        }
     }
 
     @Inject(method = "saveLevelData", at = @At("RETURN"))

@@ -130,6 +130,11 @@ public abstract class AbstractContainerMenuMixin implements ContainerBridge {
     private void doClick(int slotId, int dragType, ClickType clickType, Player player) {
         Inventory inventory = player.getInventory();
         if (clickType == ClickType.QUICK_CRAFT) {
+            if (slotId < 0 || slotId >= this.slots.size()) {
+                this.resetQuickCraft();
+                return;
+            }
+
             int j1 = this.quickcraftStatus;
             this.quickcraftStatus = getQuickcraftHeader(dragType);
             if ((j1 != 1 || this.quickcraftStatus != 2) && j1 != this.quickcraftStatus) {

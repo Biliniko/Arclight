@@ -250,6 +250,7 @@ public abstract class ServerPlayNetHandlerMixin implements ServerPlayNetHandlerB
     private int lastTick;
     private volatile int lastBookTick;
     private int lastDropTick;
+    private static final boolean arclight$DEBUG_CONTAINER_CLICK = Boolean.getBoolean("arclight.debug.container-click");
 
     private double lastPosX;
     private double lastPosY;
@@ -1400,6 +1401,18 @@ public abstract class ServerPlayNetHandlerMixin implements ServerPlayNetHandlerB
                 LOGGER.debug("Player {} interacted with invalid menu {}", this.player, this.player.containerMenu);
             } else {
                 boolean flag = packet.getStateId() != this.player.containerMenu.getStateId();
+                if (this.arclight$isInvalidContainerSlot(packet)) {
+                    this.arclight$debugContainerClick("invalid-slot", packet, flag, null, null, null, null);
+                    return;
+                }
+
+                ItemStack arclight$beforeCarried = ItemStack.EMPTY;
+                ItemStack arclight$beforeSlot = ItemStack.EMPTY;
+                if (arclight$DEBUG_CONTAINER_CLICK) {
+                    arclight$beforeCarried = this.player.containerMenu.getCarried().copy();
+                    arclight$beforeSlot = this.arclight$getSlotItemCopy(packet.getSlotNum());
+                    this.arclight$debugContainerClick("received", packet, flag, null, null, arclight$beforeCarried, arclight$beforeSlot);
+                }
 
                 this.player.containerMenu.suppressRemoteUpdates();
                 // CraftBukkit start - Call InventoryClickEvent
@@ -1415,6 +1428,7 @@ public abstract class ServerPlayNetHandlerMixin implements ServerPlayNetHandlerB
                 InventoryClickEvent event;
                 ClickType click = ClickType.UNKNOWN;
                 InventoryAction action = InventoryAction.UNKNOWN;
+                Event.Result arclight$eventResult = null;
 
                 ItemStack itemstack = ItemStack.EMPTY;
 
@@ -1498,6 +1512,11 @@ public abstract class ServerPlayNetHandlerMixin implements ServerPlayNetHandlerB
                     case SWAP:
                         if ((packet.getButtonNum() >= 0 && packet.getButtonNum() < 9) || packet.getButtonNum() == 40) {
                             click = (packet.getButtonNum() == 40) ? ClickType.SWAP_OFFHAND : ClickType.NUMBER_KEY;
+                            if (packet.getSlotNum() < 0) {
+                                action = InventoryAction.NOTHING;
+                                break;
+                            }
+
                             Slot clickedSlot = this.player.containerMenu.getSlot(packet.getSlotNum());
                             if (clickedSlot.mayPickup(player)) {
                                 ItemStack hotbar = this.player.getInventory().getItem(packet.getButtonNum());
@@ -1616,7 +1635,10 @@ public abstract class ServerPlayNetHandlerMixin implements ServerPlayNetHandlerB
                     event.setCancelled(cancelled);
                     AbstractContainerMenu oldContainer = this.player.containerMenu; // SPIGOT-1224
                     cserver.getPluginManager().callEvent(event);
+                    arclight$eventResult = event.getResult();
                     if (this.player.containerMenu != oldContainer) {
+                        oldContainer.resumeRemoteUpdates();
+                        this.arclight$debugContainerClick("container-changed", packet, flag, action, arclight$eventResult, arclight$beforeCarried, arclight$beforeSlot);
                         return;
                     }
 
@@ -1682,6 +1704,7 @@ public abstract class ServerPlayNetHandlerMixin implements ServerPlayNetHandlerB
                     }
                 }
                 // CraftBukkit end
+                this.arclight$debugContainerClick("applied", packet, flag, action, arclight$eventResult, arclight$beforeCarried, arclight$beforeSlot);
 
                 for (var entry : Int2ObjectMaps.fastIterable(packet.getChangedSlots())) {
                     this.player.containerMenu.setRemoteSlotNoCopy(entry.getIntKey(), entry.getValue());
@@ -1694,8 +1717,59 @@ public abstract class ServerPlayNetHandlerMixin implements ServerPlayNetHandlerB
                 } else {
                     this.player.containerMenu.broadcastChanges();
                 }
+                this.arclight$debugContainerClick("synced", packet, flag, action, arclight$eventResult, arclight$beforeCarried, arclight$beforeSlot);
             }
         }
+    }
+
+    private boolean arclight$isInvalidContainerSlot(ServerboundContainerClickPacket packet) {
+        int slotId = packet.getSlotNum();
+        return (slotId < -1 && slotId != -999) || slotId >= this.player.containerMenu.slots.size();
+    }
+
+    private ItemStack arclight$getSlotItemCopy(int slotId) {
+        if (slotId >= 0 && slotId < this.player.containerMenu.slots.size()) {
+            return this.player.containerMenu.getSlot(slotId).getItem().copy();
+        }
+        return ItemStack.EMPTY;
+    }
+
+    private void arclight$debugContainerClick(String phase, ServerboundContainerClickPacket packet, boolean stateMismatch,
+                                             InventoryAction action, Event.Result result, ItemStack beforeCarried, ItemStack beforeSlot) {
+        if (!arclight$DEBUG_CONTAINER_CLICK) {
+            return;
+        }
+        AbstractContainerMenu menu = this.player.containerMenu;
+        LOGGER.debug("[ArclightContainerClick:{}] player={} menu={} container={} slot={}/{} button={} type={} state={}/{} mismatch={} changed={} action={} result={} carried {} -> {} slot {} -> {}",
+            phase,
+            this.player.getScoreboardName(),
+            menu.getClass().getName(),
+            packet.getContainerId(),
+            packet.getSlotNum(),
+            menu.slots.size(),
+            packet.getButtonNum(),
+            packet.getClickType(),
+            packet.getStateId(),
+            menu.getStateId(),
+            stateMismatch,
+            packet.getChangedSlots().keySet(),
+            action,
+            result,
+            arclight$itemSummary(beforeCarried),
+            arclight$itemSummary(menu.getCarried()),
+            arclight$itemSummary(beforeSlot),
+            arclight$itemSummary(this.arclight$getSlotItemCopy(packet.getSlotNum()))
+        );
+    }
+
+    private static String arclight$itemSummary(ItemStack stack) {
+        if (stack == null) {
+            return "n/a";
+        }
+        if (stack.isEmpty()) {
+            return "empty";
+        }
+        return stack.getCount() + "x" + stack.getItem();
     }
 
     @Redirect(method = "handlePlaceRecipe", at = @At(value = "INVOKE", target = "Lnet/minecraft/network/protocol/game/ServerboundPlaceRecipePacket;getRecipe()Lnet/minecraft/resources/ResourceLocation;"))

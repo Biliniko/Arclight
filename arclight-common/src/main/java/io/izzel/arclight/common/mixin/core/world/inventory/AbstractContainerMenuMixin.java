@@ -4,6 +4,9 @@ import io.izzel.arclight.common.bridge.core.inventory.IInventoryBridge;
 import io.izzel.arclight.common.bridge.core.inventory.container.ContainerBridge;
 import io.izzel.arclight.common.bridge.core.inventory.container.SlotBridge;
 import io.izzel.arclight.common.mod.server.ArclightContainer;
+import net.minecraft.CrashReport;
+import net.minecraft.CrashReportCategory;
+import net.minecraft.ReportedException;
 import net.minecraft.core.NonNullList;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket;
@@ -33,6 +36,7 @@ import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.Unique;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -122,6 +126,158 @@ public abstract class AbstractContainerMenuMixin implements ContainerBridge {
         }
     }
 
+    @Unique
+    private boolean arclight$isValidSlotId(int slotId) {
+        return slotId >= 0 && slotId < this.slots.size();
+    }
+
+    @Unique
+    private boolean arclight$shouldIgnoreInvalidSlotClick(int slotId, ClickType clickType) {
+        if (this.arclight$isValidSlotId(slotId)) {
+            return false;
+        }
+        if (slotId == -999) {
+            return clickType != ClickType.PICKUP && clickType != ClickType.QUICK_CRAFT;
+        }
+        return true;
+    }
+
+    @Unique
+    private void arclight$handleOutsideSlotClick(int dragType, ClickType clickType, Player player) {
+        if (clickType == ClickType.PICKUP && (dragType == 0 || dragType == 1)) {
+            ClickAction clickaction = dragType == 0 ? ClickAction.PRIMARY : ClickAction.SECONDARY;
+            if (!this.getCarried().isEmpty()) {
+                if (clickaction == ClickAction.PRIMARY) {
+                    ItemStack carried = this.getCarried();
+                    this.setCarried(ItemStack.EMPTY);
+                    player.drop(carried, true);
+                } else {
+                    player.drop(this.getCarried().split(1), true);
+                }
+            }
+        } else if (clickType == ClickType.QUICK_CRAFT) {
+            this.arclight$handleOutsideQuickCraft(dragType, player);
+        } else if (this.quickcraftStatus != 0) {
+            this.resetQuickCraft();
+        }
+    }
+
+    @Unique
+    private void arclight$handleOutsideQuickCraft(int dragType, Player player) {
+        int j1 = this.quickcraftStatus;
+        this.quickcraftStatus = getQuickcraftHeader(dragType);
+        if ((j1 != 1 || this.quickcraftStatus != 2) && j1 != this.quickcraftStatus) {
+            this.resetQuickCraft();
+        } else if (this.getCarried().isEmpty()) {
+            this.resetQuickCraft();
+        } else if (this.quickcraftStatus == 0) {
+            this.quickcraftType = getQuickcraftType(dragType);
+            if (isValidQuickcraftType(this.quickcraftType, player)) {
+                this.quickcraftStatus = 1;
+                this.quickcraftSlots.clear();
+            } else {
+                this.resetQuickCraft();
+            }
+        } else if (this.quickcraftStatus == 1) {
+            this.resetQuickCraft();
+        } else if (this.quickcraftStatus == 2) {
+            this.arclight$finishQuickCraft(player);
+        } else {
+            this.resetQuickCraft();
+        }
+    }
+
+    @Unique
+    private void arclight$finishQuickCraft(Player player) {
+        if (!this.quickcraftSlots.isEmpty()) {
+            if (false && this.quickcraftSlots.size() == 1) {
+                int l = (this.quickcraftSlots.iterator().next()).index;
+                this.resetQuickCraft();
+                this.doClick(l, this.quickcraftType, ClickType.PICKUP, player);
+                return;
+            }
+            ItemStack itemstack9 = this.getCarried().copy();
+            if (itemstack9.isEmpty()) {
+                this.resetQuickCraft();
+                return;
+            }
+
+            int k1 = this.getCarried().getCount();
+
+            Map<Integer, ItemStack> draggedSlots = new HashMap<>();
+
+            for (Slot slot8 : this.quickcraftSlots) {
+                ItemStack itemstack13 = this.getCarried();
+                if (slot8 != null && canItemQuickReplace(slot8, itemstack13, true) && slot8.mayPlace(itemstack13) && (this.quickcraftType == 2 || itemstack13.getCount() >= this.quickcraftSlots.size()) && this.canDragTo(slot8)) {
+                    int j3 = slot8.hasItem() ? slot8.getItem().getCount() : 0;
+                    int k3 = Math.min(itemstack9.getMaxStackSize(), slot8.getMaxStackSize(itemstack9));
+                    int l3 = Math.min(getQuickCraftPlaceCount(this.quickcraftSlots, this.quickcraftType, itemstack9) + j3, k3);
+
+                    k1 -= l3 - j3;
+                    draggedSlots.put(slot8.index, itemstack9.copyWithCount(l3));
+                }
+            }
+
+            InventoryView view = this.getBukkitView();
+            org.bukkit.inventory.ItemStack newcursor = CraftItemStack.asCraftMirror(itemstack9);
+            newcursor.setAmount(k1);
+            Map<Integer, org.bukkit.inventory.ItemStack> eventmap = new HashMap<>();
+            for (Map.Entry<Integer, ItemStack> ditem : draggedSlots.entrySet()) {
+                eventmap.put(ditem.getKey(), CraftItemStack.asBukkitCopy(ditem.getValue()));
+            }
+            ItemStack oldCursor = this.getCarried();
+            this.setCarried(CraftItemStack.asNMSCopy(newcursor));
+            InventoryDragEvent event = new InventoryDragEvent(view, (newcursor.getType() != org.bukkit.Material.AIR ? newcursor : null), CraftItemStack.asBukkitCopy(oldCursor), this.quickcraftType == 1, eventmap);
+            Bukkit.getPluginManager().callEvent(event);
+            boolean needsUpdate = event.getResult() != Event.Result.DEFAULT;
+            if (event.getResult() != Event.Result.DENY) {
+                for (Map.Entry<Integer, ItemStack> dslot : draggedSlots.entrySet()) {
+                    view.setItem(dslot.getKey(), CraftItemStack.asBukkitCopy(dslot.getValue()));
+                }
+                if (this.getCarried() != null) {
+                    this.setCarried(CraftItemStack.asNMSCopy(event.getCursor()));
+                    needsUpdate = true;
+                }
+            } else {
+                this.setCarried(oldCursor);
+            }
+            if (needsUpdate && player instanceof ServerPlayer) {
+                this.sendAllDataToRemote();
+            }
+        }
+        this.resetQuickCraft();
+    }
+
+    /**
+     * @author IzzelAliz
+     * @reason
+     */
+    @Overwrite
+    public void clicked(int slotId, int dragType, ClickType clickType, Player player) {
+        if (slotId == -999) {
+            this.arclight$handleOutsideSlotClick(dragType, clickType, player);
+            return;
+        }
+
+        if (this.arclight$shouldIgnoreInvalidSlotClick(slotId, clickType)) {
+            return;
+        }
+
+        try {
+            this.doClick(slotId, dragType, clickType, player);
+        } catch (Exception exception) {
+            CrashReport crashReport = CrashReport.forThrowable(exception, "Container click");
+            CrashReportCategory category = crashReport.addCategory("Click info");
+            category.setDetail("Menu Type", this.menuType);
+            category.setDetail("Menu Class", this.getClass().getCanonicalName());
+            category.setDetail("Slot Count", this.slots.size());
+            category.setDetail("Slot", slotId);
+            category.setDetail("Button", dragType);
+            category.setDetail("Type", clickType);
+            throw new ReportedException(crashReport);
+        }
+    }
+
     /**
      * @author IzzelAliz
      * @reason
@@ -130,11 +286,6 @@ public abstract class AbstractContainerMenuMixin implements ContainerBridge {
     private void doClick(int slotId, int dragType, ClickType clickType, Player player) {
         Inventory inventory = player.getInventory();
         if (clickType == ClickType.QUICK_CRAFT) {
-            if (slotId < 0 || slotId >= this.slots.size()) {
-                this.resetQuickCraft();
-                return;
-            }
-
             int j1 = this.quickcraftStatus;
             this.quickcraftStatus = getQuickcraftHeader(dragType);
             if ((j1 != 1 || this.quickcraftStatus != 2) && j1 != this.quickcraftStatus) {
@@ -150,70 +301,18 @@ public abstract class AbstractContainerMenuMixin implements ContainerBridge {
                     this.resetQuickCraft();
                 }
             } else if (this.quickcraftStatus == 1) {
+                if (!this.arclight$isValidSlotId(slotId)) {
+                    this.resetQuickCraft();
+                    return;
+                }
+
                 Slot slot7 = this.slots.get(slotId);
                 ItemStack itemstack12 = this.getCarried();
                 if (canItemQuickReplace(slot7, itemstack12, true) && slot7.mayPlace(itemstack12) && (this.quickcraftType == 2 || itemstack12.getCount() > this.quickcraftSlots.size()) && this.canDragTo(slot7)) {
                     this.quickcraftSlots.add(slot7);
                 }
             } else if (this.quickcraftStatus == 2) {
-                if (!this.quickcraftSlots.isEmpty()) {
-                    if (false && this.quickcraftSlots.size() == 1) {
-                        int l = (this.quickcraftSlots.iterator().next()).index;
-                        this.resetQuickCraft();
-                        this.doClick(l, this.quickcraftType, ClickType.PICKUP, player);
-                        return;
-                    }
-                    ItemStack itemstack9 = this.getCarried().copy();
-                    if (itemstack9.isEmpty()) {
-                        this.resetQuickCraft();
-                        return;
-                    }
-
-                    int k1 = this.getCarried().getCount();
-
-                    Map<Integer, ItemStack> draggedSlots = new HashMap<>();
-
-                    for (Slot slot8 : this.quickcraftSlots) {
-                        ItemStack itemstack13 = this.getCarried();
-                        if (slot8 != null && canItemQuickReplace(slot8, itemstack13, true) && slot8.mayPlace(itemstack13) && (this.quickcraftType == 2 || itemstack13.getCount() >= this.quickcraftSlots.size()) && this.canDragTo(slot8)) {
-                            int j3 = slot8.hasItem() ? slot8.getItem().getCount() : 0;
-                            int k3 = Math.min(itemstack9.getMaxStackSize(), slot8.getMaxStackSize(itemstack9));
-                            int l3 = Math.min(getQuickCraftPlaceCount(this.quickcraftSlots, this.quickcraftType, itemstack9) + j3, k3);
-
-                            k1 -= l3 - j3;
-                            // slot8.set(itemstack14);
-                            draggedSlots.put(slot8.index, itemstack9.copyWithCount(l3));
-                        }
-                    }
-
-                    InventoryView view = this.getBukkitView();
-                    org.bukkit.inventory.ItemStack newcursor = CraftItemStack.asCraftMirror(itemstack9);
-                    newcursor.setAmount(k1);
-                    Map<Integer, org.bukkit.inventory.ItemStack> eventmap = new HashMap<>();
-                    for (Map.Entry<Integer, ItemStack> ditem : draggedSlots.entrySet()) {
-                        eventmap.put(ditem.getKey(), CraftItemStack.asBukkitCopy(ditem.getValue()));
-                    }
-                    ItemStack oldCursor = this.getCarried();
-                    this.setCarried(CraftItemStack.asNMSCopy(newcursor));
-                    InventoryDragEvent event = new InventoryDragEvent(view, (newcursor.getType() != org.bukkit.Material.AIR ? newcursor : null), CraftItemStack.asBukkitCopy(oldCursor), this.quickcraftType == 1, eventmap);
-                    Bukkit.getPluginManager().callEvent(event);
-                    boolean needsUpdate = event.getResult() != Event.Result.DEFAULT;
-                    if (event.getResult() != Event.Result.DENY) {
-                        for (Map.Entry<Integer, ItemStack> dslot : draggedSlots.entrySet()) {
-                            view.setItem(dslot.getKey(), CraftItemStack.asBukkitCopy(dslot.getValue()));
-                        }
-                        if (this.getCarried() != null) {
-                            this.setCarried(CraftItemStack.asNMSCopy(event.getCursor()));
-                            needsUpdate = true;
-                        }
-                    } else {
-                        this.setCarried(oldCursor);
-                    }
-                    if (needsUpdate && player instanceof ServerPlayer) {
-                        this.sendAllDataToRemote();
-                    }
-                }
-                this.resetQuickCraft();
+                this.arclight$finishQuickCraft(player);
             } else {
                 this.resetQuickCraft();
             }
@@ -232,7 +331,7 @@ public abstract class AbstractContainerMenuMixin implements ContainerBridge {
                     }
                 }
             } else if (clickType == ClickType.QUICK_MOVE) {
-                if (slotId < 0) {
+                if (!this.arclight$isValidSlotId(slotId)) {
                     return;
                 }
 
@@ -244,7 +343,7 @@ public abstract class AbstractContainerMenuMixin implements ContainerBridge {
                 for (ItemStack itemstack9 = this.quickMoveStack(player, slotId); !itemstack9.isEmpty() && ItemStack.isSameItem(slot6.getItem(), itemstack9); itemstack9 = this.quickMoveStack(player, slotId)) {
                 }
             } else {
-                if (slotId < 0) {
+                if (!this.arclight$isValidSlotId(slotId)) {
                     return;
                 }
 
@@ -295,6 +394,10 @@ public abstract class AbstractContainerMenuMixin implements ContainerBridge {
                 }
             }
         } else if (clickType == ClickType.SWAP) {
+            if (!this.arclight$isValidSlotId(slotId)) {
+                return;
+            }
+
             Slot slot2 = this.slots.get(slotId);
             ItemStack itemstack4 = inventory.getItem(dragType);
             ItemStack itemstack7 = slot2.getItem();
@@ -331,18 +434,18 @@ public abstract class AbstractContainerMenuMixin implements ContainerBridge {
                     }
                 }
             }
-        } else if (clickType == ClickType.CLONE && player.getAbilities().instabuild && this.getCarried().isEmpty() && slotId >= 0) {
+        } else if (clickType == ClickType.CLONE && player.getAbilities().instabuild && this.getCarried().isEmpty() && this.arclight$isValidSlotId(slotId)) {
             Slot slot5 = this.slots.get(slotId);
             if (slot5.hasItem()) {
                 ItemStack itemstack6 = slot5.getItem();
                 this.setCarried(itemstack6.copyWithCount(itemstack6.getMaxStackSize()));
             }
-        } else if (clickType == ClickType.THROW && this.getCarried().isEmpty() && slotId >= 0) {
+        } else if (clickType == ClickType.THROW && this.getCarried().isEmpty() && this.arclight$isValidSlotId(slotId)) {
             Slot slot4 = this.slots.get(slotId);
             int i1 = dragType == 0 ? 1 : slot4.getItem().getCount();
             ItemStack itemstack8 = slot4.safeTake(i1, Integer.MAX_VALUE, player);
             player.drop(itemstack8, true);
-        } else if (clickType == ClickType.PICKUP_ALL && slotId >= 0) {
+        } else if (clickType == ClickType.PICKUP_ALL && this.arclight$isValidSlotId(slotId)) {
             Slot slot3 = this.slots.get(slotId);
             ItemStack itemstack5 = this.getCarried();
             if (!itemstack5.isEmpty() && (!slot3.hasItem() || !slot3.mayPickup(player))) {

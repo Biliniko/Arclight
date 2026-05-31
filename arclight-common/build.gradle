@@ -117,8 +117,20 @@ tasks.register('spigotJar', Jar) {
     archiveClassifier.set('spigot')
 }
 
+def prepareReobfVersionMappings = tasks.register('prepareReobfVersionMappings') {
+    def mappingFile = layout.buildDirectory.file("arclight_cache/tmp_srg/reobf_version_${arclight.bukkitVersion}.srg")
+    inputs.property('bukkitVersion', arclight.bukkitVersion)
+    outputs.file(mappingFile)
+    doLast {
+        def file = mappingFile.get().asFile
+        file.parentFile.mkdirs()
+        file.text = "PK: org/bukkit/craftbukkit/v org/bukkit/craftbukkit/${arclight.bukkitVersion}"
+    }
+}
+
 afterEvaluate {
     tasks.reobfJar.configure {
+        dependsOn(prepareReobfVersionMappings)
         it.extraMappings.from(project.files('extra_mapping.tsrg'))
     }
 }

@@ -107,7 +107,7 @@ jar {
         exclude "org/apache/commons/lang/enum/**"
     }
     into('/') {
-        it.from(project(':arclight-common').tasks.jar.outputs.files.collect())
+        it.from({ project(':arclight-common').file("${project(':arclight-common').buildDir}/reobfJar/output.jar") })
         it.rename { name -> 'common.jar' }
     }
     into('/') {
@@ -116,7 +116,7 @@ jar {
     }
     from sourceSets.applaunch.output.classesDirs
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    dependsOn(project(':arclight-common').tasks.jar)
+    dependsOn(project(':arclight-common').tasks.reobfJar)
 }
 
 task generateInstallerInfo {
